@@ -10,6 +10,9 @@ from .scraper import HelloWorkScraper
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+_port = int(os.environ.get("PORT", 8000))
+
+# host, port et streamable_http_path sont des paramètres du constructeur FastMCP
 mcp = FastMCP(
     name="HelloWork Jobs Search",
     instructions="""
@@ -21,6 +24,10 @@ mcp = FastMCP(
     Les résultats incluent souvent les salaires, contrairement à LinkedIn.
     Présente toujours les résultats de façon structurée et lisible.
     """,
+    host="0.0.0.0",
+    port=_port,
+    streamable_http_path="/mcp",
+    stateless_http=True,
 )
 
 scraper = HelloWorkScraper()
@@ -199,13 +206,7 @@ async def search_and_analyze(
 
 
 def main() -> None:
-    port = int(os.environ.get("PORT", 8000))
-    mcp.run(
-        transport="streamable-http",
-        host="0.0.0.0",
-        port=port,
-        path="/mcp",
-    )
+    mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":
