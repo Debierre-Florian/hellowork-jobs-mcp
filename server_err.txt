@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\flofo\Desktop\Hello Work MCP\src\hellowork_jobs_mcp\server.py", line 212, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\flofo\Desktop\Hello Work MCP\src\hellowork_jobs_mcp\server.py", line 203, in main
+    mcp.run(
+    ~~~~~~~^
+        transport="streamable-http",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        path="/mcp",
+        ^^^^^^^^^^^^
+    )
+    ^
+TypeError: FastMCP.run() got an unexpected keyword argument 'host'

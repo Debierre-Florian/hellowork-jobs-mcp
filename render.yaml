@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: hellowork-jobs-mcp
+    runtime: python
+    buildCommand: pip install uv && uv sync
+    startCommand: python -m hellowork_jobs_mcp.server
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: PYTHON_VERSION
+        value: 3.11.0
