@@ -1,2 +1,0 @@
-INFO:     127.0.0.1:59519 - "POST /mcp HTTP/1.1" 406 Not Acceptable
-INFO:     127.0.0.1:57828 - "POST /mcp HTTP/1.1" 400 Bad Request

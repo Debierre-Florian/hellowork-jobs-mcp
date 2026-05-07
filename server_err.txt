@@ -1,7 +1,0 @@
-INFO:     Started server process [6980]
-INFO:     Waiting for application startup.
-INFO mcp.server.streamable_http_manager: StreamableHTTP session manager started
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO mcp.server.streamable_http_manager: Created new transport with session ID: d382382edb124be8adc475f4b3ed98aa
-INFO mcp.server.streamable_http_manager: Created new transport with session ID: 84fed17662434e4aaae8fbb9e52d662c

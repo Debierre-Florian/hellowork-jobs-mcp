@@ -15,6 +15,16 @@ logger = logging.getLogger(__name__)
 # dans les cards publiques, contrairement à LinkedIn qui les masque aux non-connectés.
 # Il couvre aussi très bien les PME françaises et les contrats spécifiques
 # (alternance, stage, intérim) comme filtres natifs.
+#
+# Sélecteurs CSS confirmés par inspection du HTML réel (mai 2025) :
+#   Card    : [data-cy="serpCard"]
+#   Titre   : [data-cy="offerTitle"]   (balise <a>)
+#   Ville   : [data-cy="localisationCard"]
+#   Contrat : [data-cy="contractCard"]
+#   Tags    : [data-cy="contractTag"]  (télétravail, durée…)
+#   Salaire : div.tw-typo-s-bold       (sans data-cy, contient "€")
+#   Date    : div.tw-typo-s.tw-text-grey-500
+#   Société : p.tw-typo-s.tw-inline
 
 
 class HelloWorkScraper:
@@ -39,6 +49,19 @@ class HelloWorkScraper:
         "on_site": "1",
     }
 
+    # Mots-clés télétravail dans les tags
+    _REMOTE_MAP = {
+        "télétravail total": "Télétravail",
+        "full remote": "Télétravail",
+        "télétravail partiel": "Hybride",
+        "télétravail occasionnel": "Hybride",
+        "télétravail": "Télétravail",
+        "hybride": "Hybride",
+        "hybrid": "Hybride",
+        "présentiel": "Sur site",
+        "sur site": "Sur site",
+    }
+
     def __init__(self) -> None:
         ua = UserAgent()
         self._client = httpx.AsyncClient(
@@ -54,6 +77,10 @@ class HelloWorkScraper:
             follow_redirects=True,
         )
 
+    # ------------------------------------------------------------------ #
+    #  Construction URL                                                    #
+    # ------------------------------------------------------------------ #
+
     def _build_url(
         self,
         keywords: str,
@@ -68,7 +95,6 @@ class HelloWorkScraper:
             "ray": "all",
             "p": str(page),
         }
-
         d_value = self.CONTRACT_TYPES.get(contract_type, "all")
         if d_value != "all":
             params["d"] = d_value
@@ -79,8 +105,12 @@ class HelloWorkScraper:
 
         return f"{self.BASE_URL}?{urlencode(params)}"
 
+    # ------------------------------------------------------------------ #
+    #  Requête HTTP                                                        #
+    # ------------------------------------------------------------------ #
+
     async def _fetch(self, url: str) -> str | None:
-        """Effectue la requête HTTP avec une seule tentative de retry sur 429."""
+        """Requête GET avec retry unique sur 429."""
         try:
             response = await self._client.get(url)
             if response.status_code == 429:
@@ -90,185 +120,144 @@ class HelloWorkScraper:
             response.raise_for_status()
             return response.text
         except httpx.TimeoutException:
-            logger.error("Timeout lors de la requête : %s", url)
+            logger.error("Timeout : %s", url)
         except httpx.HTTPStatusError as exc:
-            logger.error("Erreur HTTP %s pour : %s", exc.response.status_code, url)
+            logger.error("HTTP %s : %s", exc.response.status_code, url)
         except httpx.RequestError as exc:
             logger.error("Erreur réseau : %s", exc)
         return None
 
+    # ------------------------------------------------------------------ #
+    #  Helpers                                                             #
+    # ------------------------------------------------------------------ #
+
     def _extract_id_from_url(self, url: str) -> str:
-        # Ex: /fr-fr/emplois/52202814.html → "52202814"
         match = re.search(r"/(\d+)\.html", url)
         return match.group(1) if match else url.split("/")[-1]
 
     def _absolute_url(self, href: str) -> str:
-        if href.startswith("http"):
-            return href
-        return "https://www.hellowork.com" + href
+        return href if href.startswith("http") else "https://www.hellowork.com" + href
+
+    # ------------------------------------------------------------------ #
+    #  Parsing des cards                                                   #
+    # ------------------------------------------------------------------ #
 
     def _parse_cards(self, soup: BeautifulSoup) -> list:
         """
-        Tente plusieurs stratégies de sélection pour résister aux changements
-        de classes TailwindCSS de HelloWork.
+        Sélectionne les cards d'offres avec plusieurs stratégies de fallback.
+        Stratégie 1 (data-cy="serpCard") confirmée sur le HTML réel de mai 2025.
         """
-        # Stratégie 1 : attribut data-cy (le plus stable)
-        cards = soup.select('[data-cy="jobCard"]')
+        # Stratégie 1 : sélecteur principal confirmé
+        cards = soup.select('[data-cy="serpCard"]')
         if cards:
-            logger.debug("Sélecteur retenu : [data-cy=jobCard] (%d cards)", len(cards))
+            logger.debug("Sélecteur [data-cy=serpCard] → %d cards", len(cards))
             return cards
 
-        # Stratégie 2 : balises <article> avec classe tw-group (Tailwind)
-        cards = soup.select("article.tw-group, li.tw-group")
-        if cards:
-            logger.debug("Sélecteur retenu : article/li.tw-group (%d cards)", len(cards))
-            return cards
+        # Stratégie 2 : parents directs des liens d'offres
+        seen: set[int] = set()
+        fallback = []
+        for a in soup.select('a[data-cy="offerTitle"]'):
+            parent = a.find_parent("li") or a.find_parent("article") or a.find_parent("div")
+            if parent and id(parent) not in seen:
+                seen.add(id(parent))
+                fallback.append(parent)
+        if fallback:
+            logger.debug("Sélecteur fallback offerTitle-parent → %d cards", len(fallback))
+            return fallback
 
-        # Stratégie 3 : articles génériques
-        cards = soup.select("article[data-type='job']")
-        if cards:
-            logger.debug("Sélecteur retenu : article[data-type=job] (%d cards)", len(cards))
-            return cards
+        # Stratégie 3 : tous liens /emplois/ → remonte au container
+        seen2: set[int] = set()
+        fallback2 = []
+        for a in soup.select('a[href*="/emplois/"]'):
+            parent = a.find_parent("li") or a.find_parent("article") or a.find_parent("div")
+            if parent and id(parent) not in seen2:
+                seen2.add(id(parent))
+                fallback2.append(parent)
+        if fallback2:
+            logger.debug("Sélecteur fallback /emplois/ → %d cards", len(fallback2))
+            return fallback2
 
-        # Stratégie 4 : classes contenant "JobCard"
-        cards = soup.select("div[class*='JobCard'], li[class*='job-item']")
-        if cards:
-            logger.debug("Sélecteur retenu : JobCard/job-item (%d cards)", len(cards))
-            return cards
-
-        # Stratégie 5 : tout article contenant un lien d'offre
-        cards = [
-            a.find_parent("article") or a.find_parent("li")
-            for a in soup.select("a[href*='/emplois/']")
-            if a.find_parent("article") or a.find_parent("li")
-        ]
-        cards = list({id(c): c for c in cards if c}.values())
-        if cards:
-            logger.debug("Sélecteur retenu : parents de liens /emplois/ (%d cards)", len(cards))
-            return cards
-
-        logger.warning("Aucun sélecteur n'a trouvé de cards — structure HTML peut-être modifiée")
+        logger.warning("Aucun sélecteur n'a trouvé de cards — structure HelloWork modifiée ?")
         return []
 
     def _extract_job_from_card(self, card) -> HelloWorkJob | None:
         try:
             # --- TITRE & URL ---
-            # Priorité 1 : data-cy
-            title_tag = card.select_one('[data-cy="jobTitle"]')
-            # Priorité 2 : lien avec classe tw-leading (Tailwind)
+            title_tag = card.select_one('[data-cy="offerTitle"]')
             if not title_tag:
-                title_tag = card.select_one("a[class*='tw-leading']")
-            # Priorité 3 : premier <a> vers /emplois/
-            if not title_tag:
-                title_tag = card.select_one("a[href*='/emplois/']")
-            # Priorité 4 : h3
-            if not title_tag:
-                title_tag = card.select_one("h3")
-
+                title_tag = card.select_one('a[href*="/emplois/"]')
             if not title_tag:
                 return None
 
             title = title_tag.get_text(strip=True)
             href = title_tag.get("href", "")
-            if not href and title_tag.name != "a":
-                a_tag = title_tag.find("a")
-                href = a_tag.get("href", "") if a_tag else ""
             job_url = self._absolute_url(href) if href else ""
             job_id = self._extract_id_from_url(href) if href else ""
 
             # --- ENTREPRISE ---
+            # p.tw-typo-s.tw-inline contient le nom de l'entreprise
             company = "Non précisé"
-            company_tag = card.select_one('[data-cy="company"]')
+            company_tag = card.select_one("p.tw-typo-s.tw-inline")
             if not company_tag:
-                # span avec tw-mr-2 ou classe similaire
-                company_tag = card.select_one("span[class*='tw-mr-2']")
-            if not company_tag:
-                # cherche un <p> ou <span> qui suit le titre
-                for tag in card.select("p, span"):
-                    text = tag.get_text(strip=True)
-                    if text and text != title and len(text) < 80:
-                        company = text
+                # fallback : premier <p> différent du titre
+                for p in card.select("p"):
+                    txt = p.get_text(strip=True)
+                    if txt and txt != title and len(txt) < 80:
+                        company = txt
                         break
-            if company_tag:
+            else:
                 company = company_tag.get_text(strip=True)
 
-            # --- LOCALISATION & SALAIRE ---
-            # tw-text-tertiary est réutilisé pour les deux — on prend dans l'ordre
-            tertiary_tags = card.select("span[class*='tw-text-tertiary'], [data-cy='location'], [data-cy='salary']")
+            # --- LOCALISATION ---
             location = "Non précisé"
-            salary = "Non précisé"
-
-            # On peut aussi chercher spécifiquement par data-cy
-            loc_tag = card.select_one('[data-cy="location"]')
-            sal_tag = card.select_one('[data-cy="salary"]')
-
+            loc_tag = card.select_one('[data-cy="localisationCard"]')
             if loc_tag:
                 location = loc_tag.get_text(strip=True)
-            if sal_tag:
-                salary = sal_tag.get_text(strip=True)
-
-            if not loc_tag and tertiary_tags:
-                location = tertiary_tags[0].get_text(strip=True)
-                if len(tertiary_tags) > 1:
-                    salary_text = tertiary_tags[1].get_text(strip=True)
-                    # Heuristique : le salaire contient souvent "€", "K€", "k€", "an", "mois"
-                    if any(kw in salary_text for kw in ["€", "k€", "K€", "an", "mois", "brut", "net"]):
-                        salary = salary_text
 
             # --- TYPE DE CONTRAT ---
             contract_type = "Non précisé"
-            # Cherche dans les badges/tags de la card
-            contract_keywords = ["CDI", "CDD", "Alternance", "Stage", "Intérim", "Freelance", "Indépendant", "Interim"]
-            for tag in card.select("span, div, li"):
-                text = tag.get_text(strip=True)
-                if text in contract_keywords:
-                    contract_type = text
-                    break
-            # Fallback : data-cy
-            if contract_type == "Non précisé":
-                ct_tag = card.select_one('[data-cy="contract"]')
-                if ct_tag:
-                    contract_type = ct_tag.get_text(strip=True)
+            ct_tag = card.select_one('[data-cy="contractCard"]')
+            if ct_tag:
+                contract_type = ct_tag.get_text(strip=True)
+
+            # --- SALAIRE ---
+            # Le salaire est dans un div.tw-typo-s-bold sans data-cy
+            # Il contient "€" — on filtre pour éviter les faux positifs
+            salary = "Non précisé"
+            for el in card.select("div"):
+                classes = " ".join(el.get("class", []))
+                if "tw-typo-s-bold" in classes and not el.get("data-cy"):
+                    text = el.get_text(strip=True)
+                    if "€" in text and len(text) < 80:
+                        # Nettoie l'espace insécable Unicode
+                        salary = text.replace(" ", " ").strip()
+                        break
 
             # --- MODE TÉLÉTRAVAIL ---
+            # data-cy="contractTag" contient "Télétravail partiel", "Télétravail occasionnel", etc.
             remote_type = "Non précisé"
-            remote_keywords = {
-                "télétravail total": "Télétravail",
-                "télétravail": "Télétravail",
-                "full remote": "Télétravail",
-                "hybride": "Hybride",
-                "hybrid": "Hybride",
-                "présentiel": "Sur site",
-                "sur site": "Sur site",
-                "sur place": "Sur site",
-            }
-            for tag in card.select("span, div, li, p"):
-                text = tag.get_text(strip=True).lower()
-                for kw, label in remote_keywords.items():
-                    if kw in text:
+            for tag_el in card.select('[data-cy="contractTag"]'):
+                text_lower = tag_el.get_text(strip=True).lower()
+                for kw, label in self._REMOTE_MAP.items():
+                    if kw in text_lower:
                         remote_type = label
                         break
                 if remote_type != "Non précisé":
                     break
 
             # --- DATE DE PUBLICATION ---
+            # div.tw-typo-s.tw-text-grey-500 contient "il y a X heures/jours"
             posted_at = ""
-            time_tag = card.select_one("time")
-            if time_tag:
-                posted_at = time_tag.get("datetime", "") or time_tag.get_text(strip=True)
+            date_tag = card.select_one("div.tw-typo-s.tw-text-grey-500")
+            if date_tag:
+                posted_at = date_tag.get_text(strip=True)
             else:
-                date_kw = ["il y a", "aujourd'hui", "hier", "semaine", "mois"]
-                for tag in card.select("span, p, div"):
-                    text = tag.get_text(strip=True).lower()
-                    if any(kw in text for kw in date_kw) and len(text) < 40:
-                        posted_at = tag.get_text(strip=True)
+                # Fallback : cherche n'importe quel élément avec "il y a"
+                for el in card.select("span, p, div"):
+                    text = el.get_text(strip=True).lower()
+                    if ("il y a" in text or "aujourd" in text or "hier" in text) and len(text) < 40:
+                        posted_at = el.get_text(strip=True)
                         break
-
-            # --- DESCRIPTION SNIPPET ---
-            snippet = ""
-            desc_tag = card.select_one('[data-cy="jobDescription"], p[class*="tw-text"]')
-            if desc_tag:
-                snippet = desc_tag.get_text(strip=True)[:300]
 
             return HelloWorkJob(
                 id=job_id,
@@ -279,12 +268,16 @@ class HelloWorkScraper:
                 remote_type=remote_type,
                 salary=salary,
                 posted_at=posted_at,
-                description_snippet=snippet,
+                description_snippet="",
                 url=job_url,
             )
         except Exception as exc:
             logger.warning("Erreur extraction card : %s", exc)
             return None
+
+    # ------------------------------------------------------------------ #
+    #  API publique                                                        #
+    # ------------------------------------------------------------------ #
 
     async def search(
         self,
@@ -311,7 +304,7 @@ class HelloWorkScraper:
             if job:
                 jobs.append(job)
 
-        logger.info("%d offres extraites", len(jobs))
+        logger.info("%d offres extraites sur %d cards", len(jobs), len(cards))
         return jobs
 
     async def get_job_details(self, job_url: str) -> dict:
@@ -322,12 +315,12 @@ class HelloWorkScraper:
 
         soup = BeautifulSoup(html, "lxml")
 
-        # --- Description complète ---
+        # Description complète — sélecteurs par ordre de fiabilité
         description = "Non disponible"
         desc_selectors = [
             '[data-cy="jobDescription"]',
-            "div[class*='job-description']",
             "div[class*='tw-prose']",
+            "div[class*='job-description']",
             "section[class*='description']",
             "div[id*='description']",
         ]
@@ -335,21 +328,20 @@ class HelloWorkScraper:
             tag = soup.select_one(selector)
             if tag:
                 description = tag.get_text(separator=" ", strip=True)[:2000]
-                logger.debug("Description extraite via : %s", selector)
+                logger.debug("Description via : %s", selector)
                 break
 
-        # --- Critères détaillés ---
+        # Critères supplémentaires
         criteria: dict[str, str] = {}
-        criteria_keywords = {
+        for label, kws in {
             "expérience": ["expérience", "experience"],
-            "études": ["études", "formation", "bac", "diplôme"],
+            "études": ["études", "formation", "diplôme"],
             "secteur": ["secteur", "industrie"],
-        }
-        for label, kws in criteria_keywords.items():
-            for tag in soup.select("li, span, div, td"):
-                text = tag.get_text(strip=True).lower()
+        }.items():
+            for el in soup.select("li, span, div, td"):
+                text = el.get_text(strip=True).lower()
                 if any(kw in text for kw in kws) and len(text) < 100:
-                    criteria[label] = tag.get_text(strip=True)
+                    criteria[label] = el.get_text(strip=True)
                     break
 
         return {"description": description, "criteria": criteria}
