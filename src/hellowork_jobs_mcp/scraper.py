@@ -308,43 +308,100 @@ class HelloWorkScraper:
         return jobs
 
     async def get_job_details(self, job_url: str) -> dict:
-        """Récupère la description complète d'une offre individuelle."""
-        html = await self._fetch(job_url)
-        if not html:
-            return {"description": "Non disponible", "criteria": {}}
+        """
+        Récupère la description complète d'une offre individuelle.
+
+        Sélecteurs confirmés (mai 2025) :
+          - div.tw-typo-long-m       → container principal de la description
+          - p.tw-do-html-p-margin    → paragraphes individuels de la description
+
+        Note : HelloWork peut bloquer les IPs de datacenter (Render, etc.)
+        sur les pages /emplois/ tout en laissant passer la page de recherche.
+        En cas d'échec le caller reçoit accessible=False + l'URL directe.
+        """
+        # Timeout court : fail fast plutôt qu'attendre 15s sur Render
+        html = await self._fetch_detail(job_url)
+        if html is None:
+            return {
+                "description": None,
+                "criteria": {},
+                "accessible": False,
+                "url": job_url,
+            }
 
         soup = BeautifulSoup(html, "lxml")
 
-        # Description complète — sélecteurs par ordre de fiabilité
-        description = "Non disponible"
-        desc_selectors = [
-            '[data-cy="jobDescription"]',
-            "div[class*='tw-prose']",
-            "div[class*='job-description']",
-            "section[class*='description']",
-            "div[id*='description']",
-        ]
-        for selector in desc_selectors:
-            tag = soup.select_one(selector)
-            if tag:
-                description = tag.get_text(separator=" ", strip=True)[:2000]
-                logger.debug("Description via : %s", selector)
-                break
+        # --- Description complète ---
+        # Stratégie 1 : container tw-typo-long-m (confirmé mai 2025)
+        description = ""
+        desc_container = soup.select_one("div.tw-typo-long-m")
+        if desc_container:
+            paragraphs = desc_container.select("p.tw-do-html-p-margin")
+            if paragraphs:
+                description = "\n\n".join(
+                    p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)
+                )
+                logger.debug("Description via div.tw-typo-long-m (%d §)", len(paragraphs))
 
-        # Critères supplémentaires
-        criteria: dict[str, str] = {}
-        for label, kws in {
-            "expérience": ["expérience", "experience"],
-            "études": ["études", "formation", "diplôme"],
-            "secteur": ["secteur", "industrie"],
-        }.items():
-            for el in soup.select("li, span, div, td"):
-                text = el.get_text(strip=True).lower()
-                if any(kw in text for kw in kws) and len(text) < 100:
-                    criteria[label] = el.get_text(strip=True)
+        # Stratégie 2 : tous les p.tw-do-html-p-margin de la page
+        if not description:
+            paragraphs = soup.select("p.tw-do-html-p-margin")
+            if paragraphs:
+                description = "\n\n".join(
+                    p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)
+                )
+                logger.debug("Description via p.tw-do-html-p-margin (%d §)", len(paragraphs))
+
+        # Stratégie 3 : anciens sélecteurs (fallback si structure change)
+        if not description:
+            for selector in ["div[class*='tw-prose']", "div[class*='job-description']", "section[class*='description']"]:
+                tag = soup.select_one(selector)
+                if tag:
+                    description = tag.get_text(separator="\n", strip=True)
+                    logger.debug("Description via fallback : %s", selector)
                     break
 
-        return {"description": description, "criteria": criteria}
+        description = description[:2000] if description else ""
+
+        # --- Critères supplémentaires ---
+        criteria: dict[str, str] = {}
+        # Salaire affiché sur la fiche (data-cy="salary-tag-button")
+        sal_tag = soup.select_one('[data-cy="salary-tag-button"]')
+        if sal_tag:
+            criteria["salaire"] = sal_tag.get_text(strip=True).replace(" ", " ")
+
+        # Titre du poste confirmé
+        job_title_tag = soup.select_one('[data-cy="jobTitle"]')
+        if job_title_tag:
+            criteria["titre"] = job_title_tag.get_text(strip=True)
+
+        return {
+            "description": description or "Description non disponible dans le HTML.",
+            "criteria": criteria,
+            "accessible": True,
+            "url": job_url,
+        }
+
+    async def _fetch_detail(self, url: str) -> str | None:
+        """Requête vers une page de détail avec timeout réduit (8s)."""
+        try:
+            response = await self._client.get(url, timeout=8.0)
+            if response.status_code == 429:
+                logger.warning("Rate limited (429) sur fiche — attente 2s")
+                await asyncio.sleep(2)
+                response = await self._client.get(url, timeout=8.0)
+            if response.status_code in (403, 404, 410):
+                logger.warning("Accès refusé %s : %s", response.status_code, url)
+                return None
+            response.raise_for_status()
+            return response.text
+        except httpx.TimeoutException:
+            logger.warning("Timeout fiche (8s) : %s — IP peut-être bloquée par HelloWork", url)
+        except httpx.HTTPStatusError as exc:
+            logger.error("HTTP %s fiche : %s", exc.response.status_code, url)
+        except httpx.RequestError as exc:
+            logger.error("Erreur réseau fiche : %s", exc)
+        return None
 
     async def close(self) -> None:
         await self._client.aclose()

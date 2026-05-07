@@ -116,10 +116,14 @@ async def get_job_details(job_url: str) -> str:
 
     details = await scraper.get_job_details(job_url)
 
-    if details["description"] == "Non disponible":
+    # La page individuelle est inaccessible (timeout ou IP bloquée par HelloWork)
+    if not details.get("accessible"):
         return (
-            "HelloWork n'a pas répondu dans les délais ou la page est inaccessible.\n"
-            f"Vous pouvez consulter l'offre directement : {job_url}"
+            "## Fiche inaccessible depuis ce serveur\n\n"
+            "HelloWork bloque les requêtes provenant des IPs de datacenter "
+            "sur les pages d'offre individuelles (protection anti-scraping).\n\n"
+            f"**Consultez l'offre directement dans votre navigateur :**\n🔗 {job_url}\n\n"
+            "_La recherche `search_jobs` reste pleinement fonctionnelle._"
         )
 
     lines = [f"## Détail de l'offre\n🔗 {job_url}\n"]
